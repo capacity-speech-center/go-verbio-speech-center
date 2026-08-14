@@ -31,9 +31,20 @@ func (r *Recogniser) RecogniseWithGrammar(audioFile string, grammarFile string, 
 	}
 }
 
-func (r *Recogniser) RecogniseWithTopic(audioFile string, topic string, language string, wordBoosting []string) (string, error) {
-	log.Logger.Infof("Performing Topic recognition [audioFile=%s] [topic=%s] [language=%s] [wordBoosting=%v]", audioFile, topic, language, wordBoosting)
-	configuration, err := generateTopicRequest(topic, language, wordBoosting)
+type TopicRecognition struct {
+	Topic                 string
+	TopicName             string
+	Language              string
+	Provider              string
+	WordBoosting          []string
+	SpeechCompleteTimeout uint32
+}
+
+func (r *Recogniser) RecogniseWithTopic(audioFile string, recognition TopicRecognition) (string, error) {
+	log.Logger.Infof("Performing Topic recognition [audioFile=%s] [topic=%s] [topicName=%s] [language=%s] [provider=%s] [wordBoosting=%v] [speechCompleteTimeout=%s]",
+		audioFile, recognition.Topic, recognition.TopicName, recognition.Language, recognition.Provider,
+		recognition.WordBoosting, formatSpeechCompleteTimeout(recognition.SpeechCompleteTimeout))
+	configuration, err := generateTopicRequest(recognition)
 	if err != nil {
 		return "", errors.New(fmt.Sprintf("error creating topic request: %+v", err))
 	}
@@ -100,10 +111,11 @@ func (r *Recogniser) collectResponses(c chan recogResult) chan recogResult {
 			}
 			// Extract transcript from result
 			if result := resp.GetResult(); result != nil && len(result.Alternatives) > 0 {
-				log.Logger.Debugf("Got partial recog: %s (is_final: %v) (silence: %d ms)",
-					result.Alternatives[0].Transcript, result.IsFinal, r.calculateEndOfUtteranceSilence(result, totalAudioLengthInMs))
+				log.Logger.Debugf("Got partial recog: %s (is_final: %v) (is_endpoint: %v) (silence: %d ms)",
+					result.Alternatives[0].Transcript, result.IsFinal, result.IsEndpoint,
+					r.calculateEndOfUtteranceSilence(result, totalAudioLengthInMs))
 				if result.IsFinal {
-					recog = append(recog, result.Alternatives[0].Transcript)
+					recog = append(recog, markEndpoint(result.Alternatives[0].Transcript, result.IsEndpoint))
 					totalAudioLengthInMs += result.Duration
 				}
 			}
@@ -111,6 +123,14 @@ func (r *Recogniser) collectResponses(c chan recogResult) chan recogResult {
 	}
 	log.Logger.Debugf("< all responses received")
 	return c
+}
+
+func markEndpoint(transcript string, isEndpoint bool) string {
+	transcript = strings.TrimSpace(transcript)
+	if isEndpoint {
+		return strings.TrimSpace(transcript + " <endpoint>")
+	}
+	return transcript
 }
 
 func (r *Recogniser) calculateEndOfUtteranceSilence(result *sttv1.RecognitionResult, totalAudioLengthInMs float32) int32 {
@@ -194,6 +214,22 @@ func (r *Recogniser) SendAudioRequest(audioChunk []byte) error {
 	return r.streamClient.Send(audioRequest)
 }
 
+func formatSpeechCompleteTimeout(speechCompleteTimeout uint32) string {
+	if speechCompleteTimeout == 0 {
+		return "unset"
+	}
+	return fmt.Sprintf("%dms", speechCompleteTimeout)
+}
+
+func generateTimerConfiguration(speechCompleteTimeout uint32) *sttv1.TimerConfiguration {
+	if speechCompleteTimeout == 0 {
+		return nil
+	}
+	return &sttv1.TimerConfiguration{
+		SpeechCompleteTimeout: &speechCompleteTimeout,
+	}
+}
+
 func generateGrammarRequest(grammar []byte, language string, wordBoosting []string) *sttv1.RecognitionStreamingRequest {
 	sampleRate := uint32(8000)
 
@@ -228,39 +264,62 @@ func generateGrammarRequest(grammar []byte, language string, wordBoosting []stri
 	}
 }
 
-func generateTopicRequest(topic string, language string, wordBoosting []string) (*sttv1.RecognitionStreamingRequest, error) {
-	topicLower := strings.ToLower(topic)
-	if topicLower != "generic" {
-		return nil, errors.New(fmt.Sprintf("unrecognized topic: %s (only 'generic' is supported)", topic))
+func generateTopicRequest(recognition TopicRecognition) (*sttv1.RecognitionStreamingRequest, error) {
+	resource, err := generateTopicResource(recognition)
+	if err != nil {
+		return nil, err
 	}
 
 	// Default sample rate for speech recognition (16kHz is common)
 	sampleRate := uint32(8000)
 
-	log.Logger.Infof("Performing recognition with topic: %s", topicLower)
-	resource := &sttv1.RecognitionResource{
-		Resource: &sttv1.RecognitionResource_Topic_{
-			Topic: sttv1.RecognitionResource_GENERIC,
-		},
-	}
-
 	config := &sttv1.RecognitionConfig{
 		Parameters: &sttv1.RecognitionParameters{
-			Language: language,
+			Language: recognition.Language,
 			AudioEncoding: &sttv1.RecognitionParameters_Pcm{
 				Pcm: &sttv1.PCM{
 					SampleRateHz: sampleRate,
 				},
 			},
-			WordBoosting: wordBoosting,
+			WordBoosting: recognition.WordBoosting,
 		},
-		Resource: resource,
-		Version:  sttv1.RecognitionConfig_V2,
+		Resource:      resource,
+		Configuration: generateTimerConfiguration(recognition.SpeechCompleteTimeout),
+	}
+
+	if recognition.Provider != "" {
+		config.Provider = &recognition.Provider
+	} else {
+		config.Version = sttv1.RecognitionConfig_V2
 	}
 
 	return &sttv1.RecognitionStreamingRequest{
 		RecognitionRequest: &sttv1.RecognitionStreamingRequest_Config{
 			Config: config,
+		},
+	}, nil
+}
+
+func generateTopicResource(recognition TopicRecognition) (*sttv1.RecognitionResource, error) {
+	if recognition.TopicName != "" {
+		topicName := strings.ToLower(strings.TrimSpace(recognition.TopicName))
+		log.Logger.Infof("Performing recognition with topic name: %s", topicName)
+		return &sttv1.RecognitionResource{
+			Resource: &sttv1.RecognitionResource_TopicName{
+				TopicName: topicName,
+			},
+		}, nil
+	}
+
+	topicLower := strings.ToLower(recognition.Topic)
+	if topicLower != "generic" {
+		return nil, errors.New(fmt.Sprintf("unrecognized topic: %s (only 'generic' is supported)", recognition.Topic))
+	}
+
+	log.Logger.Infof("Performing recognition with topic: %s", topicLower)
+	return &sttv1.RecognitionResource{
+		Resource: &sttv1.RecognitionResource_Topic_{
+			Topic: sttv1.RecognitionResource_GENERIC,
 		},
 	}, nil
 }

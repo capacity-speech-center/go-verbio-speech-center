@@ -25,11 +25,14 @@ type GlobalOpts struct {
 }
 
 type RecognizeOpts struct {
-	Audio        string   `short:"a" long:"audio" description:"Audio file to be sent" required:"true"`
-	Grammar      string   `short:"g" long:"grammar" description:"Path to the grammar to be used"`
-	Topic        string   `short:"T" long:"topic" description:"Topic to be used"`
-	Language     string   `short:"L" long:"language" description:"Language to be used" default:"en-US"`
-	WordBoosting []string `short:"w" long:"word-boosting" description:"Word to boost during recognition (can be specified multiple times)"`
+	Audio                 string   `short:"a" long:"audio" description:"Audio file to be sent" required:"true"`
+	Grammar               string   `short:"g" long:"grammar" description:"Path to the grammar to be used"`
+	TopicName             string   `short:"N" long:"topic-name" description:"Topic to be used, as a free-form name (generic, medical, finance, conversational_ai, beauty, telecommunications, home_services)"`
+	Topic                 string   `short:"T" long:"topic" description:"[DEPRECATED] Topic to be used. Use --topic-name instead"`
+	Provider              string   `short:"p" long:"provider" description:"Speech recognition provider to use (verbio, deepgram, capacity)"`
+	Language              string   `short:"L" long:"language" description:"Language to be used" default:"en-US"`
+	WordBoosting          []string `short:"w" long:"word-boosting" description:"Word to boost during recognition (can be specified multiple times)"`
+	SpeechCompleteTimeout uint32   `long:"speech-complete-timeout" description:"Milliseconds of silence after speech that end an utterance (from 1 to 5000). Left to the recogniser default when omitted"`
 }
 
 type SynthesizeOpts struct {
@@ -62,13 +65,27 @@ func (r *RecognizeCommand) Execute() error {
 	}
 	defer recogniser.Close()
 
+	if r.cmd.Topic != "" {
+		log.Logger.Warn("--topic is deprecated, use --topic-name instead")
+	}
+
 	var res string
 	if r.cmd.Grammar != "" {
+		if r.cmd.SpeechCompleteTimeout != 0 {
+			log.Logger.Warn("Ignoring --speech-complete-timeout: grammar recognition is served by asr3, which exposes no endpointing setting")
+		}
 		res, err = recogniser.RecogniseWithGrammar(r.cmd.Audio, r.cmd.Grammar, r.cmd.Language, r.cmd.WordBoosting)
-	} else if r.cmd.Topic != "" {
-		res, err = recogniser.RecogniseWithTopic(r.cmd.Audio, r.cmd.Topic, r.cmd.Language, r.cmd.WordBoosting)
+	} else if r.cmd.TopicName != "" || r.cmd.Topic != "" {
+		res, err = recogniser.RecogniseWithTopic(r.cmd.Audio, verbio_speech_center.TopicRecognition{
+			Topic:                 r.cmd.Topic,
+			TopicName:             r.cmd.TopicName,
+			Language:              r.cmd.Language,
+			Provider:              r.cmd.Provider,
+			WordBoosting:          r.cmd.WordBoosting,
+			SpeechCompleteTimeout: r.cmd.SpeechCompleteTimeout,
+		})
 	} else {
-		log.Logger.Fatal("Either a grammar or a topic must be specified for recognition")
+		log.Logger.Fatal("Either a grammar or a topic name must be specified for recognition")
 	}
 	if err != nil {
 		log.Logger.Fatalf("Error in recognition: %+v", err)
