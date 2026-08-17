@@ -14,6 +14,10 @@ import (
 	"google.golang.org/grpc"
 )
 
+// MaxSpeechCompleteTimeoutMs is the longest end-of-speech silence the service
+// accepts. Anything above it is refused there, so it is refused here too.
+const MaxSpeechCompleteTimeoutMs = uint32(5000)
+
 func (r *Recogniser) RecogniseWithGrammar(audioFile string, grammarFile string, language string, wordBoosting []string) (string, error) {
 	log.Logger.Infof("Performing Grammar recognition [audioFile=%s] [grammarFile=%s] [language=%s] [wordBoosting=%v]", audioFile, grammarFile, language, wordBoosting)
 
@@ -265,6 +269,11 @@ func generateGrammarRequest(grammar []byte, language string, wordBoosting []stri
 }
 
 func generateTopicRequest(recognition TopicRecognition) (*sttv1.RecognitionStreamingRequest, error) {
+	recognition, err := normalizeTopicRecognition(recognition)
+	if err != nil {
+		return nil, err
+	}
+
 	resource, err := generateTopicResource(recognition)
 	if err != nil {
 		return nil, err
@@ -300,13 +309,23 @@ func generateTopicRequest(recognition TopicRecognition) (*sttv1.RecognitionStrea
 	}, nil
 }
 
+func normalizeTopicRecognition(recognition TopicRecognition) (TopicRecognition, error) {
+	recognition.TopicName = strings.ToLower(strings.TrimSpace(recognition.TopicName))
+
+	if recognition.SpeechCompleteTimeout > MaxSpeechCompleteTimeoutMs {
+		return recognition, errors.New(fmt.Sprintf("speech complete timeout of %dms is above the %dms maximum",
+			recognition.SpeechCompleteTimeout, MaxSpeechCompleteTimeoutMs))
+	}
+
+	return recognition, nil
+}
+
 func generateTopicResource(recognition TopicRecognition) (*sttv1.RecognitionResource, error) {
 	if recognition.TopicName != "" {
-		topicName := strings.ToLower(strings.TrimSpace(recognition.TopicName))
-		log.Logger.Infof("Performing recognition with topic name: %s", topicName)
+		log.Logger.Infof("Performing recognition with topic name: %s", recognition.TopicName)
 		return &sttv1.RecognitionResource{
 			Resource: &sttv1.RecognitionResource_TopicName{
-				TopicName: topicName,
+				TopicName: recognition.TopicName,
 			},
 		}, nil
 	}

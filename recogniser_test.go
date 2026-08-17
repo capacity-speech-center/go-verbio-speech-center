@@ -56,6 +56,39 @@ func TestGenerateTopicRequestFallsBackToDeprecatedTopic(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestGenerateTopicRequestWhitespaceTopicNameFallsBackToDeprecatedTopic(t *testing.T) {
+	topicRequest, err := generateTopicRequest(TopicRecognition{TopicName: "   ", Topic: "GENERIC", Language: "es"})
+	assert.NoError(t, err)
+
+	resource := topicRequest.GetConfig().GetResource()
+	assert.IsType(t, &sttv1.RecognitionResource_Topic_{}, resource.GetResource())
+	assert.Equal(t, sttv1.RecognitionResource_GENERIC, resource.GetTopic())
+	assert.Empty(t, resource.GetTopicName())
+}
+
+func TestGenerateTopicRequestWhitespaceTopicNameWithoutTopicIsRejected(t *testing.T) {
+	_, err := generateTopicRequest(TopicRecognition{TopicName: "   ", Language: "es"})
+	assert.Error(t, err)
+}
+
+func TestGenerateTopicRequestRejectsSpeechCompleteTimeoutAboveMaximum(t *testing.T) {
+	_, err := generateTopicRequest(TopicRecognition{
+		TopicName:             "generic",
+		Language:              "es",
+		SpeechCompleteTimeout: MaxSpeechCompleteTimeoutMs + 1,
+	})
+	assert.Error(t, err)
+
+	// The maximum itself is still a valid request.
+	atMaximum, err := generateTopicRequest(TopicRecognition{
+		TopicName:             "generic",
+		Language:              "es",
+		SpeechCompleteTimeout: MaxSpeechCompleteTimeoutMs,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, MaxSpeechCompleteTimeoutMs, atMaximum.GetConfig().GetConfiguration().GetSpeechCompleteTimeout())
+}
+
 func TestGenerateTopicRequestProviderReplacesVersion(t *testing.T) {
 	withProvider, err := generateTopicRequest(TopicRecognition{TopicName: "generic", Language: "es", Provider: "capacity"})
 	assert.NoError(t, err)
